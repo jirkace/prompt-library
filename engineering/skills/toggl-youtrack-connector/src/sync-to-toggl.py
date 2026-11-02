@@ -118,17 +118,34 @@ def main():
     print(f'  Workspace ID: {workspace_id}')
 
     print('Fetching Toggl projects...')
-    toggl_projects = toggl_get(f'/workspaces/{workspace_id}/projects', {'active': 'both'})
+    # The endpoint is paginated; without per_page/page it silently truncates the list.
+    toggl_projects = []
+    page = 1
+    while True:
+        batch = toggl_get(f'/workspaces/{workspace_id}/projects',
+                          {'active': 'both', 'per_page': 200, 'page': page})
+        toggl_projects.extend(batch)
+        if len(batch) < 200:
+            break
+        page += 1
     projects_by_name = {p['name']: p for p in toggl_projects}
     projects_by_id = {p['id']: p for p in toggl_projects}
     print(f'  Found {len(toggl_projects)} projects')
 
     print(f'Fetching YouTrack issues ({TAKER_FIELD}: me)...')
-    issues = yt_get('/issues', {
-        'query': f'{TAKER_FIELD}: me',
-        'fields': 'id,idReadable,summary,resolved',
-        '$top': '500',
-    })
+    # Paginate with $skip/$top; a single $top request silently drops older issues.
+    issues = []
+    page_size = 500
+    while True:
+        batch = yt_get('/issues', {
+            'query': f'{TAKER_FIELD}: me',
+            'fields': 'id,idReadable,summary,resolved',
+            '$top': str(page_size),
+            '$skip': str(len(issues)),
+        })
+        issues.extend(batch)
+        if len(batch) < page_size:
+            break
     print(f'  Found {len(issues)} issues')
 
     created = archived = restored = skipped = 0
