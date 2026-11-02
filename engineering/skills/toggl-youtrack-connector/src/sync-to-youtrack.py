@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import base64
 import json
 import os
@@ -19,6 +20,30 @@ def resolve_secret(value: str) -> str:
     if result.returncode != 0:
         raise RuntimeError(f'1Password lookup failed for {value!r}: {result.stderr.strip()}')
     return result.stdout.strip()
+
+
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(
+        description='Post Toggl time entries as YouTrack work items on the issues mapped '
+                    'by sync-to-toggl.py. Already-synced entry IDs are skipped.',
+        epilog='Without options the last 7 days are synced. Dates are UTC (YYYY-MM-DD). '
+               'Mapping: ~/.youtrack-toggl-mapping.json',
+    )
+    p.add_argument('--days', type=int, default=7, metavar='N',
+                   help='sync the last N days up to today (default: 7)')
+    p.add_argument('--since', type=date.fromisoformat, metavar='YYYY-MM-DD',
+                   help='start date (inclusive); overrides --days')
+    p.add_argument('--until', type=date.fromisoformat, metavar='YYYY-MM-DD',
+                   help='end date (inclusive, default: today); requires --since')
+    args = p.parse_args(argv)
+    if args.until and not args.since:
+        p.error('--until requires --since')
+    return args
+
+
+# Parse CLI before resolving secrets so --help works without env/1Password
+# and an unknown flag aborts before any API call.
+ARGS = parse_args() if __name__ == '__main__' else None
 
 
 YT_BASE = os.environ.get('YOUTRACK_BASE_URL', '').rstrip('/')
@@ -81,31 +106,20 @@ def load_mapping():
 
 
 def save_mapping(mapping):
-    MAPPING_PATH.write_text(json.dumps(mapping, indent=2))
+    # Write to a temp file and rename, so an interrupted save never leaves a truncated mapping.
+    tmp = MAPPING_PATH.with_suffix('.json.tmp')
+    tmp.write_text(json.dumps(mapping, indent=2))
+    os.replace(tmp, MAPPING_PATH)
 
 
-def parse_date_range():
-    args = sys.argv[1:]
-
-    def get_flag(flag):
-        try:
-            i = args.index(flag)
-            return args[i + 1]
-        except (ValueError, IndexError):
-            return None
-
+def parse_date_range(args):
     today = date.today()
-    since = get_flag('--since')
-    if since:
-        until = get_flag('--until') or today.isoformat()
-        return f'{since}T00:00:00+00:00', f'{until}T23:59:59+00:00', since, until
-
-    days_arg = get_flag('--days')
-    days = int(days_arg) if days_arg else 7
-    from_date = today - timedelta(days=days)
-    from_str = from_date.isoformat()
-    today_str = today.isoformat()
-    return f'{from_str}T00:00:00+00:00', f'{today_str}T23:59:59+00:00', from_str, today_str
+    if args.since:
+        since, until = args.since, args.until or today
+    else:
+        since, until = today - timedelta(days=args.days), today
+    return (f'{since.isoformat()}T00:00:00+00:00', f'{until.isoformat()}T23:59:59+00:00',
+            since.isoformat(), until.isoformat())
 
 
 def ms_timestamp(iso_str):
@@ -113,9 +127,10 @@ def ms_timestamp(iso_str):
     return int(dt.timestamp() * 1000)
 
 
-def main():
+def main(args=None):
+    args = args or ARGS or parse_args([])
     mapping = load_mapping()
-    start_date, end_date, display_start, display_end = parse_date_range()
+    start_date, end_date, display_start, display_end = parse_date_range(args)
 
     project_to_issue = {
         data['toggl_project_id']: issue_id
@@ -156,6 +171,8 @@ def main():
                 'text': f'Toggl #{entry["id"]}: {description}',
             })
             mapping['synced_entries'].append(entry['id'])
+            # Persist after every post: an interrupted run must not re-post on the next run.
+            save_mapping(mapping)
             print('done')
             synced += 1
         except Exception as e:

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import base64
 import json
 import os
@@ -19,6 +20,25 @@ def resolve_secret(value: str) -> str:
     if result.returncode != 0:
         raise RuntimeError(f'1Password lookup failed for {value!r}: {result.stderr.strip()}')
     return result.stdout.strip()
+
+
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(
+        description='Sync YouTrack issues where you are Taker to Toggl projects: unresolved '
+                    '-> active project (created/restored), resolved -> archived. Also rotates '
+                    'the monthly FSWEB service ticket and registers manually created '
+                    '"[ISSUE-ID] ..." projects.',
+        epilog='Env: YOUTRACK_BASE_URL, YOUTRACK_TOKEN|YOUTRACK_LSDEVTOOLS_TOKEN, TOGGL_TOKEN, '
+               'YOUTRACK_TAKER_FIELD (default: Taker). Values may be op:// references. '
+               'Mapping: ~/.youtrack-toggl-mapping.json',
+    )
+    return p.parse_args(argv)
+
+
+# Parse CLI before resolving secrets so --help works without env/1Password
+# and an unknown flag aborts before any API call.
+if __name__ == '__main__':
+    parse_args()
 
 
 YT_BASE = os.environ.get('YOUTRACK_BASE_URL', '').rstrip('/')
@@ -105,7 +125,10 @@ def load_mapping():
 
 
 def save_mapping(mapping):
-    MAPPING_PATH.write_text(json.dumps(mapping, indent=2))
+    # Write to a temp file and rename, so an interrupted save never leaves a truncated mapping.
+    tmp = MAPPING_PATH.with_suffix('.json.tmp')
+    tmp.write_text(json.dumps(mapping, indent=2))
+    os.replace(tmp, MAPPING_PATH)
 
 
 def main():
